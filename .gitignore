@@ -3,6 +3,6 @@ __pycache__/
 runs/
 datasets/
 artifacts/
-extract_data/
+/extract_data
 samples/
 /data/
