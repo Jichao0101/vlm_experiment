@@ -1,6 +1,14 @@
-# Qwen3.5-9B 实验脚本
+# Qwen3.5 VLM 实验
 
-本目录用于保存代码，本地做结构验证，真实推理在云端执行。一起上传整个`src/`；JSON配置与对应脚本放在同一目录。
+本仓库维护 VLM 数据构建、精度评估、推理与性能诊断。当前正式实验使用 4B，0.8B 用于本地环境验收，9B 结果作为历史记录。
+
+本地原图与标注位于 `data/`，完整数据清单位于 `datasets/baseline_v1/`，固定性能样本位于 `samples/perf_32/`。这三类数据由本地提供；在其他机器上准备原图后，从仓库根目录执行：
+
+```bash
+python3 src/s02_build_baseline_dataset.py --data-root data --out datasets/baseline_v1
+```
+
+已有本地清单可直接使用。构建入口要求新输出目录。性能和推理实验另需按运行机器配置模型、GPU 及输出目录。标注复核见 [visualizer 使用说明](visualizer/README.md)。
 
 ## 文件与启动约定
 
