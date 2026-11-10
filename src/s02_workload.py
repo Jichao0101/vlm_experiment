@@ -111,33 +111,6 @@ def generate(model, processor, inputs, max_new_tokens, torch):
                               pad_token_id=processor.tokenizer.pad_token_id)
 
 
-def read_diagnostic_config(path):
-    """读取Nsight固定负载配置，不接受样本效率入口的mode/DP参数。"""
-    path = Path(path).resolve()
-    config = json.loads(path.read_text(encoding='utf-8'))
-    required = {'sample_manifest', 'model', 'out', 'gpu', 'batch_size',
-                'warmup_batches', 'capture_batches', 'context_budget', 'max_new_tokens',
-                'cpu_threads_per_worker', 'attn_implementation'}
-    if set(config) != required:
-        raise ValueError(f'Expected exactly diagnostic fields; missing={required-set(config)}, extra={set(config)-required}')
-    for key in ('batch_size', 'warmup_batches', 'capture_batches', 'context_budget',
-                'max_new_tokens', 'cpu_threads_per_worker'):
-        if type(config[key]) is not int or config[key] < 1:
-            raise ValueError(key + ' must be a positive integer')
-    if config['max_new_tokens'] >= config['context_budget']:
-        raise ValueError('max_new_tokens must be smaller than context_budget')
-    if not isinstance(config['gpu'], str) or not config['gpu'] or ',' in config['gpu']:
-        raise ValueError('gpu must select exactly one device ID/UUID')
-    if not isinstance(config['attn_implementation'], (str, dict)) or not config['attn_implementation']:
-        raise ValueError('attn_implementation must be an explicit backend string or subconfig mapping')
-    for key in ('sample_manifest', 'model', 'out'):
-        if not isinstance(config[key], str) or not config[key]:
-            raise ValueError(key + ' must be a nonempty path')
-        value = Path(config[key]).expanduser()
-        config[key] = str((value if value.is_absolute() else path.parent / value).resolve())
-    return config
-
-
 def prepare_fixed_batch(rows, processor, prompt, config):
     """为Nsight完整准备CPU输入并关闭图片；样本效率入口保留分阶段编排。"""
     images = load_images(rows)

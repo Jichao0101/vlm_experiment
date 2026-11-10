@@ -4,13 +4,10 @@ from contextlib import contextmanager
 import json
 import importlib.metadata
 import os
-import shlex
-import subprocess
-import sys
 from pathlib import Path
 import traceback
 
-from s02_workload import (GENERATION_SEED, PROMPT_TEMPLATE, read_diagnostic_config,
+from s02_workload import (GENERATION_SEED, PROMPT_TEMPLATE,
                           load_fixed_samples, load_model, make_prompt, prepare_fixed_batch, generate)
 
 
@@ -77,44 +74,30 @@ def _generation_nvtx_regions(model, nvtx):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default=str(Path(__file__).resolve().with_suffix('.json')),
-                        help='JSON config (default: %(default)s)')
-    parser.add_argument('--ncu', choices=('basic', 'full'), help='由ncu启动同一负载；省略时直接运行')
-    parser.add_argument('--phase', choices=('vision', 'language_prefill', 'language_decode',
-                                          'prefill_logits', 'decode_logits'))
-    parser.add_argument('--kernel', help='ncu demangled名称过滤表达式，支持regex:前缀')
-    parser.add_argument('--launch-skip', type=int, help='显式填写当前过滤条件下跳过的匹配数，允许0')
-    parser.add_argument('--launch-count', type=int, help='显式填写待采集的连续匹配实例数')
-    parser.add_argument('--report', help='ncu报告路径/前缀，每次使用新名称')
-    parser.add_argument('--print-command', action='store_true', help='仅校验并打印ncu命令，不运行负载')
+    for name in ('model', 'sample-manifest', 'out'):
+        parser.add_argument('--' + name, required=True, type=Path)
+    for name in ('batch-size', 'warmup-batches', 'capture-batches', 'context-budget',
+                 'max-new-tokens', 'cpu-threads-per-worker'):
+        parser.add_argument('--' + name, type=int, required=True)
+    parser.add_argument('--gpu', required=True)
+    parser.add_argument('--attn-implementation', required=True, help='后端名或按子模块指定的JSON对象')
     args = parser.parse_args()
-    selection = (args.phase, args.kernel, args.launch_skip, args.launch_count)
-    if args.ncu is None:
-        if args.print_command or args.report is not None or any(x is not None for x in selection):
-            parser.error('ncu options require --ncu basic/full')
-    else:
-        if not args.report or not args.report.strip():
-            parser.error('--ncu requires --report')
-        command = ['ncu', '--nvtx', '--kernel-name-base', 'demangled', '--set', args.ncu]
-        if args.ncu == 'basic' and all(x is None for x in selection):
-            # 保留无过滤的清单模式，已有 trace 时优先使用下面的定向采集。
-            command += ['--nvtx-include', 'measure/']
-        else:
-            if any(x is None for x in selection) or not args.kernel.strip():
-                parser.error('targeted basic/full requires --phase, --kernel, --launch-skip and --launch-count')
-            if args.launch_skip < 0 or args.launch_count <= 0:
-                parser.error('full requires launch-skip >= 0 and launch-count > 0')
-            command += ['--nvtx-include', 'measure/' + args.phase,
-                        '--kernel-name', args.kernel, '--launch-skip', str(args.launch_skip),
-                        '--launch-count', str(args.launch_count)]
-        command += ['-o', args.report, sys.executable, str(Path(__file__).resolve()),
-                    '--config', str(Path(args.config).resolve())]
-        # 子进程不再传--ncu，避免递归启动；命令数组不经shell解释。
-        print(shlex.join(command), flush=True)
-        if not args.print_command:
-            raise SystemExit(subprocess.run(command, check=False).returncode)
-        return
-    config = read_diagnostic_config(args.config)
+    config = vars(args)
+    for key, value in config.items():
+        if isinstance(value, Path):
+            config[key] = str(value.expanduser().resolve())
+        elif isinstance(value, int) and value < 1:
+            parser.error(key + ' must be positive')
+    if args.max_new_tokens >= args.context_budget:
+        parser.error('max-new-tokens must be smaller than context-budget')
+    if not args.gpu.strip() or ',' in args.gpu:
+        parser.error('gpu must select one device')
+    if not args.attn_implementation.strip():
+        parser.error('empty attention backend')
+    if args.attn_implementation.lstrip().startswith('{'):
+        config['attn_implementation'] = json.loads(args.attn_implementation)
+        if not config['attn_implementation']:
+            parser.error('empty attention backend mapping')
     rows = load_fixed_samples(config['sample_manifest'])
     needed = config['batch_size'] * config['capture_batches']
     if len(rows) < needed:

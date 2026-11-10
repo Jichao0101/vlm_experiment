@@ -23,14 +23,14 @@ python3 src/s02_build_baseline_dataset.py --data-root data --out datasets/baseli
 | [s02_build_baseline_dataset.py](src/s02_build_baseline_dataset.py) | 构建数据清单 | 脚本内BUILD_SETTINGS与CLI |
 | [s02_export_samples.py](src/s02_export_samples.py) | 从完整训练集导出固定清单和原图 | [同名JSON](src/s02_export_samples.json) |
 | [s02_sample_eval.py](src/s02_sample_eval.py) | 样本吞吐、batch/DP与阶段/算子测量 | [同名JSON](src/s02_sample_eval.json) |
-| [s02_profile_workload.py](src/s02_profile_workload.py) | 为Nsight提供固定生成负载 | [同名JSON](src/s02_profile_workload.json) |
+| [s02_profile_workload.py](src/s02_profile_workload.py) | 为Nsight提供固定生成负载 | [NCU 采集脚本](src/profile_ncu.sh) |
 | [s02_evaluate_baseline.py](src/s02_evaluate_baseline.py) | 完整验证集质量评估 | CLI |
 | [s02_workload.py](src/s02_workload.py) | 共享输入、模型加载与生成语义 | 供样本效率与Nsight入口调用 |
 | [experiment_profiler.py](src/experiment_profiler.py) | 通用计时、显存和算子采集 | 库模块 |
 
-三个JSON入口默认读取脚本自身目录中的同名`.json`，不依赖启动时的工作目录。也可用`--config /path/to/config.json`覆盖；JSON内部的相对路径始终基于该JSON目录。默认的是配置文件位置，实验参数仍要求显式填写。
+导出样本和样本评估这两个JSON入口默认读取脚本自身目录中的同名`.json`，不依赖启动时的工作目录。也可用`--config /path/to/config.json`覆盖；JSON内部的相对路径始终基于该JSON目录。默认的是配置文件位置，实验参数仍要求显式填写。
 
-示例配置路径相对于src目录。导出脚本读取完整dataset；两个性能入口均读取`../samples/perf_32/samples.jsonl`，与benchmark输出目录独立。填写当前机器实际的4B模型目录和GPU，每轮使用新的out。以下命令从项目根目录执行。
+示例配置路径相对于src目录。导出脚本读取完整dataset；样本评估默认读取`../samples/perf_32/samples.jsonl`，NCU 在容器中默认读取同一固定清单的挂载路径 `/samples/samples.jsonl`，与benchmark输出目录独立。填写当前机器实际的4B模型目录和GPU，每轮使用新的out。以下命令从项目根目录执行。
 
 
 
@@ -111,39 +111,21 @@ trace保留`pipeline/`流程范围和`experiment/vision`、`experiment/language_
 
 读取同一冻结清单，在每个待采集batch完整generate预热后，用NVTX `measure`标记生成及完成同步；内部通过hook标记`vision`、`language_prefill`、`language_decode`及独立的`prefill_logits`/`decode_logits`。语言阶段按进入forward前的cache长度和输入长度判定，不按调用序号猜测；阶段之间不新增同步。输入准备、预热和输出写盘位于范围外。与operator对照时核对固定样本、模型、SDPA后端、输入/生成预算及预热条件，使用独立out；两个入口的采集窗口和预热组织不同，不把各自耗时直接作性能对照。
 
-```bash
-python src/s02_profile_workload.py
-```
+在 [profile_ncu.sh](src/profile_ncu.sh) 顶部设置模型、输入、预热、生成预算和 NCU 过滤条件。shell 直接启动 NCU，Python 执行一次固定工作负载，记录实际生效参数与输出；每轮输出目录含 report.ncu-rep、command.sh 和 workload/workload.json。源码与输入挂载约定见脚本默认值。
 
-先在 trace 的目标阶段按 GPU kernel 名累计耗时排序，比较每图累计耗时、次数及单次耗时。再沿关联 ID 回查框架算子和输入 shape，将同名不同工作的调用拆组。按时间贡献和实验问题选组，记录阶段、kernel 名、shape、grid/block 及在该阶段和名称过滤下的匹配顺序。多 stream 有重叠时，累计耗时用于筛选候选，端到端收益另用 benchmark 验证。
-
-4090/4B 的 prefill 例子：按名称累计耗时排第一的 GEMM 在 B8 有 120 次，其中权重 `[2560,9216]` 的 MLP 投影有 64 次。该投影首次匹配在 B1 排第 1，grid 为 `[72,75,1]`；在 B8 排第 3，grid 为 `[72,598,1]`，两者 block 均为 `[64,1,1]`。这些是 trace 给出的候选位置。先核对 basic 报告，若需要区分形状和 grid 都相同的具体层或投影，应增加模块级 NVTX 范围后再采。
-
-以下示例在仓库根目录、容器内执行。默认 JSON 使用 /model、/samples 和 B1，每轮复制一份配置、显式设定 batch 并创建独立输出，保留相同的样本选择、预热及生成预算。
+先在 trace 中按阶段统计设备耗时和每图累计耗时，反查热点 kernel 对应的算子与 shape，再按组选择可比实例。4090/4B 的目标 prefill GEMM 在 B8 有 120 次同名调用，其中 64 次对应权重 [2560,9216]。该 shape 首次出现的 grid 在 B1 为 [72,75,1]，在 B8 为 [72,598,1]，block 均为 [64,1,1]。以下为容器内示例：
 
 ```bash
-profile_prefill() (
-  set -eu
-  batch=$1 set_name=$2 skip=$3 count=$4
-  run=$(mktemp -d "/out/prefill-b${batch}-${set_name}.XXXXXX")
-  python - "$batch" "$run" <<'PYCFG'
-from pathlib import Path
-import json, sys
-run = Path(sys.argv[2])
-cfg = json.loads(Path("src/s02_profile_workload.json").read_text())
-cfg.update(batch_size=int(sys.argv[1]), model="/model", sample_manifest="/samples/samples.jsonl",
-           capture_batches=1, out=str(run / "workload"))
-(run / "config.json").write_text(json.dumps(cfg, indent=2))
-PYCFG
-  python src/s02_profile_workload.py --config "$run/config.json" --ncu "$set_name" \
-    --phase language_prefill --kernel 'regex:^ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_tn$' \
-    --launch-skip "$skip" --launch-count "$count" --report "$run/report"
-)
-profile_prefill 1 basic 0 4
-profile_prefill 8 basic 0 4
+# 定向 basic：各核对前 4 个匹配。
+BATCH_SIZE=1 bash src/profile_ncu.sh
+BATCH_SIZE=8 bash src/profile_ncu.sh
+
+# 两档 basic 分别确认第 1 和第 3 个匹配后才执行 full。
+NCU_SET=full BATCH_SIZE=1 LAUNCH_SKIP=0 LAUNCH_COUNT=1 bash src/profile_ncu.sh
+NCU_SET=full BATCH_SIZE=8 LAUNCH_SKIP=2 LAUNCH_COUNT=1 bash src/profile_ncu.sh
 ```
 
-若 basic 的名称、顺序与 grid/block 均符合上述候选，再执行 `profile_prefill 1 full 0 1` 和 `profile_prefill 8 full 2 1`。一档 basic 的匹配数和顺序仅对本档过滤条件有效。若结果不符，回查对应 trace 或细化 NVTX 范围。只打印命令时向脚本追加 `--print-command`。旧式 `--ncu basic --report NAME` 仍支持整个 measure 清单，适用于确实需要全窗口盘点的场景。
+`--print-command` 可预览实际命令。上述序号限于本轮阶段和名称过滤条件；shape/grid 相同且需区分投影时补模块级 NVTX 标记。全窗口盘点使用 `NCU_SCOPE=measure NCU_SET=basic bash src/profile_ncu.sh`。旧的 Python `--ncu` 包装入口和默认 JSON 已由 shell 收敛替代，其他 NCU 参数直接在采集脚本中维护。
 
 - full后核对报告的实际名称、阶段、启动配置和采集数量是否满足所选范围；无匹配、少采、执行失败或实例对应不明时，不作预期目标的硬件结论。
 - NVTX标记CPU提交范围。默认kernel replay下，阶段筛选仍生成逐kernel指标，不是阶段整体Roofline；不根据CPU标记跨度计算GPU阶段耗时。
