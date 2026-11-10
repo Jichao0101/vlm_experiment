@@ -1,9 +1,9 @@
 {
-  "sample_manifest": "../samples/perf_32/samples.jsonl",
-  "model": "/workspace/dms-eye-status-turbo/qwen_models/Qwen3.5-4B",
-  "out": "../runs/ncu_workload_b16_v1",
+  "sample_manifest": "/samples/samples.jsonl",
+  "model": "/model",
+  "out": "/out/ncu_workload_b1",
   "gpu": "0",
-  "batch_size": 16,
+  "batch_size": 1,
   "warmup_batches": 2,
   "capture_batches": 1,
   "context_budget": 5600,

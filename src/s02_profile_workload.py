@@ -1,4 +1,4 @@
-"""固定S02生成负载，供ncu/nsys启动；先basic核对调用清单，再full采集指定实例。"""
+"""固定S02生成负载，供ncu/nsys启动；由 trace 筛热点后，用定向 basic 核对候选，再以 full 采集已确认的实例。"""
 import argparse
 from contextlib import contextmanager
 import json
@@ -96,13 +96,12 @@ def main():
         if not args.report or not args.report.strip():
             parser.error('--ncu requires --report')
         command = ['ncu', '--nvtx', '--kernel-name-base', 'demangled', '--set', args.ncu]
-        if args.ncu == 'basic':
-            if any(x is not None for x in selection):
-                parser.error('basic inventories all measure kernels; selection options are not allowed')
+        if args.ncu == 'basic' and all(x is None for x in selection):
+            # 保留无过滤的清单模式，已有 trace 时优先使用下面的定向采集。
             command += ['--nvtx-include', 'measure/']
         else:
             if any(x is None for x in selection) or not args.kernel.strip():
-                parser.error('full requires --phase, --kernel, --launch-skip and --launch-count')
+                parser.error('targeted basic/full requires --phase, --kernel, --launch-skip and --launch-count')
             if args.launch_skip < 0 or args.launch_count <= 0:
                 parser.error('full requires launch-skip >= 0 and launch-count > 0')
             command += ['--nvtx-include', 'measure/' + args.phase,
