@@ -112,7 +112,7 @@ def generate(model, processor, inputs, max_new_tokens, torch):
 
 
 def read_diagnostic_config(path):
-    """两个短诊断入口共用固定负载配置，不接受原扫描器的mode/DP参数。"""
+    """读取Nsight固定负载配置，不接受样本效率入口的mode/DP参数。"""
     path = Path(path).resolve()
     config = json.loads(path.read_text(encoding='utf-8'))
     required = {'sample_manifest', 'model', 'out', 'gpu', 'batch_size',
@@ -139,7 +139,7 @@ def read_diagnostic_config(path):
 
 
 def prepare_fixed_batch(rows, processor, prompt, config):
-    """完整准备CPU输入并关闭图片；短诊断复用，原测量入口保留分阶段编排。"""
+    """为Nsight完整准备CPU输入并关闭图片；样本效率入口保留分阶段编排。"""
     images = load_images(rows)
     try:
         inputs = prepare_inputs(images, processor, prompt)
