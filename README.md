@@ -23,6 +23,7 @@ python3 src/s02_build_baseline_dataset.py --data-root data --out datasets/baseli
 | [s02_build_baseline_dataset.py](src/s02_build_baseline_dataset.py) | 构建数据清单 | 脚本内BUILD_SETTINGS与CLI |
 | [s02_export_samples.py](src/s02_export_samples.py) | 从完整训练集导出固定清单和原图 | [同名JSON](src/s02_export_samples.json) |
 | [s02_sample_eval.py](src/s02_sample_eval.py) | 样本吞吐、batch/DP与阶段/算子测量 | [同名JSON](src/s02_sample_eval.json) |
+| [s02_compare_vision_backends.py](src/s02_compare_vision_backends.py) | 成对生成并执行 vision SDPA/FA2 对照 | 样本评估JSON与CLI |
 | [s02_profile_workload.py](src/s02_profile_workload.py) | 为Nsight提供固定生成负载 | [NCU 采集脚本](src/profile_ncu.sh) |
 | [s02_evaluate_baseline.py](src/s02_evaluate_baseline.py) | 完整验证集质量评估 | CLI |
 | [s02_workload.py](src/s02_workload.py) | 共享输入、模型加载与生成语义 | 供样本效率与Nsight入口调用 |
@@ -154,7 +155,7 @@ s02_workload.py封装固定prompt、可迁移样本清单校验与路径解析�
 - 正式批次：67/68/70/71/75训练、77验证、79测试；完整会话不能拆分，同人不同会话允许跨集合。hard或缺失/非法标注整图排除，构建时检查跨集合相同图片。
 - GT按标注ID固定映射：id=2为image_left_eye，id=1为image_right_eye，不按框中心重新排序。schema v4保留像素GT与整数Norm1000 xyxy目标；预测还原一次为浮点像素评分，不补框、不交换左右。
 - BF16、离线加载、左padding、非思考greedy、num_beams=1、use_cache=True。示例总预算5600、输出上限256，超限不截断；图像预算沿用processor。样本效率与Nsight负载seed=42，正式评估CLI默认seed=20261003。
-- 每次generate不传递上次输出cache。样本效率固定请求SDPA；Nsight负载的attn_implementation显式配置，对照时保持一致。Nsight入口只接受完整采集批次，样本数须达到batch_size×capture_batches；operator入口可能包含尾批，以实际输出的批次和样本数为准。
+- 每次generate不传递上次输出cache。样本效率通过 attn_implementation 指定后端，旧JSON缺省时沿用SDPA；Nsight负载显式配置同一后端。Nsight入口只接受完整采集批次，样本数须达到batch_size×capture_batches；operator入口可能包含尾批，以实际输出的批次和样本数为准。
 
 ## 当前状态与依据
 
@@ -163,3 +164,43 @@ s02_workload.py封装固定prompt、可迁移样本清单校验与路径解析�
 知识库实验方案定义方法，实验记录及附录保存历史结果；本说明不复制历史分析。用户后续明确约定优先于旧文档中的GT排序、非法标注处理或schema表述。原文位置见AGENTS.md，历史结果不要求适配当前接口。
 
 参考：[Qwen3.5实现](https://github.com/huggingface/transformers/blob/v5.2.0/src/transformers/models/qwen3_5/modeling_qwen3_5.py)、[Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html)。
+
+
+## Vision attention 后端对照
+
+目标是在固定4B模型、BF16、输入图像网格和生成条件下，对照视觉SDPA逐序列调用与FlashAttention-2变长序列路径。只改变视觉后端，语言侧保持SDPA。本实验不改变linear attention的可选加速依赖。现有benchmark、timing、memory、operator入口复用同一配置，记录实际子模型后端和flash-attn版本；缺依赖或请求未生效会将配置记为失败。
+
+使用 [s02_compare_vision_backends.py](src/s02_compare_vision_backends.py) 生成成对配置并执行对照。默认按 operator、timing、benchmark 顺序，每个模式先 SDPA 后 FA2，扫描 B1/B8；诊断各采 1 批，benchmark 重复 3 次。模型、样本及预热/生成预算继承 `s02_sample_eval.json`，可以用 `--config` 指定其他基础配置。脚本固定 text 为 SDPA，只切换 vision。
+
+```bash
+python src/s02_compare_vision_backends.py \
+  --model /model --sample-manifest /samples/samples.jsonl \
+  --out runs/vision_backend_v1
+```
+
+`--out` 要求新目录，内部 `configs/` 保存实际配置，`sdpa_operator/`、`fa2_operator/` 等目录保存对应结果。脚本使用当前 Python，任一实验失败即停止并保留结果。单项重跑可修改该项配置的 out，再交给 `s02_sample_eval.py --config`。
+
+| 参数 | 用途 |
+|---|---|
+| `--prepare-only` | 只生成配置并打印命令，供审核或拆开执行 |
+| `--modes operator` | 只运行两种后端的短窗口诊断；也支持 timing、memory、benchmark |
+| `--gpu 0 --batch-sizes 1 8` | 设置单卡与递增 batch 档位 |
+| `--capture-batches 1 --repeats 3` | 分别控制诊断批数与 benchmark 重复数 |
+| `--reverse` | 每个模式先 FA2 后 SDPA，在新目录复测运行顺序影响 |
+
+正式执行前脚本检查 `flash_attn_varlen_func` 能否导入并打印框架版本。环境需先安装兼容的 FlashAttention；安装后两种后端都在同一环境重测，验收通过的版本固化到镜像。
+
+```bash
+# 约束已验收的框架版本，限制编译并行度以控制内存占用。
+python -m pip freeze | grep -Ei '^(torch|transformers|accelerate|pillow)==' > /tmp/vision-backend-constraints.txt
+MAX_JOBS=2 python -m pip install --no-build-isolation -c /tmp/vision-backend-constraints.txt flash-attn
+python -m pip check
+```
+
+先核对每档result.json的status与runtime.attention_backends，再按同batch、同sample_id比较输出。operator窗口只采一个batch，故B1与B8覆盖数量不同；同一batch的后端对照使用相同样本。完整清单比较使用benchmark输出。检查输入token、图像网格、输出长度、截断、JSON解析与眼部框/状态差异，逐token变化需进一步复核。固定性能样本只支持输出回归诊断，采用候选前另做任务质量回归。
+
+在operator trace中定位vision阶段。SDPA路径的视觉attention接口调用通常随图像序列数增长；FA2路径预期每层进入一次变长attention接口，并通过cu_seqlens隔离各图。检查实际前向kernel及其调用组织，CUDA kernel数量可能受实现影响。timing模式用于比较vision阶段的同步诊断时间，benchmark模式用完整清单的重复耗时、images/s和显存峰值判定收益。必要时反转后端运行顺序，在新输出目录重复，以排除运行顺序影响。
+
+若调用减少但vision耗时未改善，说明本负载下合并调用收益有限。若vision改善而整体收益很小，检查prefill/decode占比及输出长度。只有重复吞吐收益、容量和质量回归都满足预定容差才采用候选。当前实现只完成可配置与生效检查，4090上的安装兼容性、变长路径及性能收益需要实际运行验证。
+
+依据为[Transformers 5.2.0视觉attention分支](https://github.com/huggingface/transformers/blob/v5.2.0/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L915-L956)、[子模型后端配置](https://huggingface.co/docs/transformers/v5.2.0/en/attention_interface#backbone-specific-attention)和[FlashAttention安装与硬件支持](https://github.com/Dao-AILab/flash-attention#installation-and-features)。

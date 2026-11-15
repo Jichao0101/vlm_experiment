@@ -14,7 +14,7 @@ import traceback
 
 from experiment_profiler import MemoryProfiler, OperatorProfiler, TimingProfiler, memory_stats
 from s02_workload import (PROMPT_TEMPLATE, GENERATION_SEED, load_fixed_samples,
-                          load_model, make_prompt, load_images, prepare_inputs, generate)
+                          attention_runtime, load_model, make_prompt, load_images, prepare_inputs, generate)
 OPERATOR_SETTINGS = {'record_shapes': True, 'profile_memory': True, 'with_stack': False}
 
 
@@ -48,6 +48,16 @@ def read_config(path):
     missing = required - config.keys()
     if missing:
         raise ValueError('Missing config fields: ' + ', '.join(sorted(missing)))
+    # 旧配置固定SDPA；显式映射同时指定两侧，便于单变量后端对照。
+    backend = config.setdefault('attn_implementation', 'sdpa')
+    if isinstance(backend, dict):
+        if set(backend) != {'vision_config', 'text_config'}:
+            raise ValueError('Attention mapping requires vision_config and text_config')
+        names = list(backend.values())
+    else:
+        names = [backend]
+    if any(not isinstance(name, str) or not name.strip() or name != name.strip() for name in names):
+        raise ValueError('Attention backends must be nonempty names without surrounding whitespace')
     mode = config['mode']
     if mode not in ('benchmark', 'timing', 'memory', 'operator'):
         raise ValueError('mode must be benchmark, timing, memory or operator')
@@ -264,6 +274,7 @@ def runtime_context(torch, model, processor, gpu):
         'transformers': transformers.__version__, 'model_class': type(model).__name__,
         'processor_image_settings': processor.image_processor.to_dict(),
         'padding_side': processor.tokenizer.padding_side,
+        **attention_runtime(model),
     }
 
 
@@ -401,7 +412,7 @@ def worker(config, rows, gpu, batch_size, rank, output, barrier):
         torch.cuda.manual_seed_all(GENERATION_SEED)
         torch.backends.cuda.matmul.allow_tf32 = False
         tick = time.perf_counter()
-        model, processor = load_model(config['model'], torch, attn_implementation='sdpa')
+        model, processor = load_model(config['model'], torch, attn_implementation=config['attn_implementation'])
         torch.cuda.synchronize()
         result['load_us'] = (time.perf_counter() - tick) * 1e6
         result['runtime'] = runtime_context(torch, model, processor, gpu)

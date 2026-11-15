@@ -1,5 +1,6 @@
 """S02共享负载：冻结输入、离线加载、图像预处理与greedy生成；无测量或诊断。"""
 import json
+import importlib.metadata
 from pathlib import Path
 
 PROMPT_TEMPLATE = '''Locate the driver's two eyes in this image.
@@ -72,7 +73,29 @@ def load_model(model_path, torch, *, attn_implementation):
     model = Qwen3_5ForConditionalGeneration.from_pretrained(
         model_path, local_files_only=True, dtype=torch.bfloat16,
         device_map={'': 0}, attn_implementation=attn_implementation).eval()
+    # 子配置反映实际分派的后端；请求未生效时结束该实验配置。
+    actual = attention_runtime(model)['attention_backends']
+    requested = attn_implementation
+    for key, backend in actual.items():
+        expected = requested.get(key, requested.get('')) if isinstance(requested, dict) else requested
+        if expected is not None and backend != expected:
+            raise ValueError(f'Attention backend mismatch for {key}: requested {expected}, got {backend}')
     return model, processor
+
+
+def attention_runtime(model):
+    """记录实际子模型配置及可选FlashAttention包版本，供两种测量入口复用。"""
+    try:
+        flash_version = importlib.metadata.version('flash-attn')
+    except importlib.metadata.PackageNotFoundError:
+        flash_version = None
+    return {
+        'attention_backends': {
+            'vision_config': model.model.visual.config._attn_implementation,
+            'text_config': model.model.language_model.config._attn_implementation,
+        },
+        'flash_attn_version': flash_version,
+    }
 
 
 def make_prompt(processor):

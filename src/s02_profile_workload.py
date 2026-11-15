@@ -8,7 +8,7 @@ from pathlib import Path
 import traceback
 
 from s02_workload import (GENERATION_SEED, PROMPT_TEMPLATE,
-                          load_fixed_samples, load_model, make_prompt, prepare_fixed_batch, generate)
+                          load_fixed_samples, attention_runtime, load_model, make_prompt, prepare_fixed_batch, generate)
 
 
 @contextmanager
@@ -123,7 +123,8 @@ def main():
         result['runtime'] = {'torch': torch.__version__, 'cuda_runtime': torch.version.cuda,
                              'transformers': importlib.metadata.version('transformers'),
                              'gpu_name': torch.cuda.get_device_properties(0).name,
-                             'model_config': model.config.to_dict(), 'dtype': str(model.dtype)}
+                             'model_config': model.config.to_dict(), 'dtype': str(model.dtype),
+                             **attention_runtime(model)}
         # 完整generate预热；不传递生成所得cache。每批CPU输入保持至采集结束。
         for index in range(config['capture_batches']):
             batch = rows[index * config['batch_size']:(index + 1) * config['batch_size']]

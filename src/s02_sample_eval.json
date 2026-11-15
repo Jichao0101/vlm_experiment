@@ -18,5 +18,9 @@
   "cpu_threads_per_worker": 4,
   "gpus": [
     "0"
-  ]
+  ],
+  "attn_implementation": {
+    "vision_config": "sdpa",
+    "text_config": "sdpa"
+  }
 }
