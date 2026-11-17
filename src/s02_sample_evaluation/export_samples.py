@@ -6,7 +6,7 @@ import random
 import shutil
 import tempfile
 
-from s02_workload import load_dataset, load_fixed_samples
+from workload import load_dataset, load_fixed_samples
 
 
 def export_samples(config_path):

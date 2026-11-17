@@ -17,11 +17,20 @@
 - 方案以E工作包组织方法，记录以S编号跟踪执行。不要将“已完成/待执行”等进度和记录中的编号反向写入方案作为设计依据。
 - 修改关键合同或阶段时，同步README必要恢复摘要；需要回写知识库时先遵循该知识库的授权与写入规则。单次结果先进入实验记录，再由明确的设计修订指导后续实验。
 
+## 代码目录
+
+- `src/data/`：完整数据清单构建，供抽样、正式评估和后续训练使用。
+- `src/s01_load_check/`：模型加载、processor 和单图运行检查。
+- `src/s02_sample_evaluation/`：固定样本性能分析、后端对照及 NCU；workload 和 profiler 保留在本阶段。
+- `src/s03_baseline/`：输出合同与正式质量评估，当前仍为单卡实现。
+- `src/s04_sft/`：后续实现微调时建立，当前不创建占位代码。
+- 直接从仓库根目录按脚本路径运行；同目录脚本使用本地导入。阶段目录名称不代表已实现多卡能力。
+
 ## 实现与运行边界
 
 - 当前模型统一4B；本地4090用于NCU学习和小规模推理优化对照，云端用于优化复验及训练。人工确认的数据集构建成功可记为前置通过，不额外要求截图。
 - 不因历史GPU配置或测量自动启动全量评估/训练；按当前任务执行，并在实际GPU运行前检查可用资源。
-- 数据构建与评估通过manifest对接，保持独立。数据构建配置保留在代码中；导出样本和样本评估两个JSON入口默认读取与脚本同目录、同名的JSON，支持`--config`覆盖；固定性能样本由s02_export_samples.py从完整train导出清单和原图，清单image相对其目录；处理后标注与图像同处samples.jsonl，SHA和来源统计另存sample_info.json，清单无需split；两个性能入口直接读取sample_manifest，不依赖完整dataset。样本效率通过mode控制扫描和诊断，operator模式统一采集算子统计和trace；Nsight由src/profile_ncu.sh配置负载、直接启动ncu并调用Python工作负载，不另设Python接口核验入口。两个JSON入口直接读取完整JSON，不合并参数默认值；配置字段以代码和README为准。本环节独立实现，不依赖下一阶段正式评估脚本；随机采样用于效率测量，不要求session/场景覆盖，不计算精度或设置精度门禁。运行产物中的配置记录保留。
+- 数据构建与评估通过manifest对接，保持独立。数据构建配置保留在代码中；导出样本和样本评估两个JSON入口默认读取与脚本同目录、同名的JSON，支持`--config`覆盖；固定性能样本由`src/s02_sample_evaluation/export_samples.py`从完整train导出清单和原图，清单image相对其目录；处理后标注与图像同处samples.jsonl，SHA和来源统计另存sample_info.json，清单无需split；两个性能入口直接读取sample_manifest，不依赖完整dataset。样本效率通过mode控制扫描和诊断，operator模式统一采集算子统计和trace；Nsight由src/s02_sample_evaluation/profile_ncu.sh配置负载、直接启动ncu并调用Python工作负载，不另设Python接口核验入口。两个JSON入口直接读取完整JSON，不合并参数默认值；配置字段以代码和README为准。本环节独立实现，不依赖下一阶段正式评估脚本；随机采样用于效率测量，不要求session/场景覆盖，不计算精度或设置精度门禁。运行产物中的配置记录保留。
 - 正式精度评估不恢复hash扫描或计时统计；性能测量放在样本实验中，普通吞吐测量与profiler分开。
 - 保留用户本地修改；不删除已有数据/结果。验证使用临时目录，不把临时测试脚本与中间产物留在代码仓。
 

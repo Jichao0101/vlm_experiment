@@ -11,7 +11,7 @@ import sys
 def main():
     source_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=source_dir / 's02_sample_eval.json',
+    parser.add_argument('--config', type=Path, default=source_dir / 'sample_eval.json',
                         help='基础样本配置；继承预热、输入和生成预算')
     parser.add_argument('--model', type=Path, help='覆盖基础配置的模型路径')
     parser.add_argument('--sample-manifest', type=Path, help='覆盖基础配置的样本清单')
@@ -68,7 +68,7 @@ def main():
                 config['capture_batches'] = args.capture_batches
             path = config_dir / f'{label}_{mode}.json'
             path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-            commands.append([sys.executable, str(source_dir / 's02_sample_eval.py'), '--config', str(path)])
+            commands.append([sys.executable, str(source_dir / 'sample_eval.py'), '--config', str(path)])
     for command in commands:
         print(shlex.join(command), flush=True)
         if not args.prepare_only:

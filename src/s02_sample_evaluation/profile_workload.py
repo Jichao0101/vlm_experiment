@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import traceback
 
-from s02_workload import (GENERATION_SEED, PROMPT_TEMPLATE,
+from workload import (GENERATION_SEED, PROMPT_TEMPLATE,
                           load_fixed_samples, attention_runtime, load_model, make_prompt, prepare_fixed_batch, generate)
 
 

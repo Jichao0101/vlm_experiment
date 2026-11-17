@@ -13,7 +13,7 @@ import time
 import traceback
 
 from experiment_profiler import MemoryProfiler, OperatorProfiler, TimingProfiler, memory_stats
-from s02_workload import (PROMPT_TEMPLATE, GENERATION_SEED, load_fixed_samples,
+from workload import (PROMPT_TEMPLATE, GENERATION_SEED, load_fixed_samples,
                           attention_runtime, load_model, make_prompt, load_images, prepare_inputs, generate)
 OPERATOR_SETTINGS = {'record_shapes': True, 'profile_memory': True, 'with_stack': False}
 

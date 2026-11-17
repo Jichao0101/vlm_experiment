@@ -34,7 +34,7 @@ else
 fi
 
 # 固定输入、生成和预热条件；在 B1/B8 对照中只改变 batch。
-workload=(python "$src_dir/s02_profile_workload.py"
+workload=(python "$src_dir/profile_workload.py"
   --model "${MODEL_DIR:-/model}" --sample-manifest "${SAMPLE_MANIFEST:-/samples/samples.jsonl}"
   --batch-size "$batch" --gpu 0 --warmup-batches 2 --capture-batches 1
   --context-budget 5600 --max-new-tokens 256 --cpu-threads-per-worker 4
