@@ -1,61 +1,100 @@
-# Qwen3.5 VLM 实验
+# Qwen3.5 VLM 实验脚本
 
-本仓库维护 VLM 数据构建、精度评估、推理与性能诊断。当前正式实验使用 4B，0.8B 用于本地环境验收，9B 结果作为历史记录。
+脚本覆盖数据构建、样本导出、模型推理、质量评估和性能采集。以下命令从仓库根目录执行，`/model` 表示本机或容器内的模型目录，使用时替换为实际路径。
 
-本地原图与标注位于 `data/`，完整数据清单位于 `datasets/baseline_v1/`，固定性能样本位于 `samples/perf_32/`。这三类数据由本地提供；在其他机器上准备原图后，从仓库根目录执行：
+## 脚本索引
+
+| 脚本 | 功能 | 配置入口 |
+|---|---|---|
+| [s01_memory_probe.py](src/s01_memory_probe.py) | 权重加载显存与参数布局检查 | 脚本中的 MODEL、OUT、CUDA_VISIBLE_DEVICES |
+| [s01_processor_probe.py](src/s01_processor_probe.py) | CPU 输入长度与视觉 token 估算 | CLI |
+| [s01_single_reference_probe.py](src/s01_single_reference_probe.py) | 单张参考图重复推理 | CLI |
+| [s02_build_baseline_dataset.py](src/s02_build_baseline_dataset.py) | 构建 train/val/test 数据清单 | BUILD_SETTINGS 与 CLI |
+| [s02_export_samples.py](src/s02_export_samples.py) | 导出固定样本及图像 | [同名 JSON](src/s02_export_samples.json) |
+| [s02_sample_eval.py](src/s02_sample_eval.py) | 吞吐、阶段计时、显存及 operator trace | [同名 JSON](src/s02_sample_eval.json) |
+| [s02_compare_vision_backends.py](src/s02_compare_vision_backends.py) | 生成并运行视觉后端成对配置 | 样本评估 JSON 与 CLI |
+| [s02_profile_ncu.sh](src/s02_profile_ncu.sh) | 配置并启动 NCU 采集 | 环境变量与脚本参数 |
+| [s02_profile_workload.py](src/s02_profile_workload.py) | 执行带 NVTX 标记的固定生成负载 | CLI，通常由 NCU 脚本调用 |
+| [s02_evaluate_baseline.py](src/s02_evaluate_baseline.py) | 验证集或测试集质量评估 | CLI |
+| [s02_workload.py](src/s02_workload.py) | 样本加载、输入处理和生成公共函数 | 供其他脚本导入 |
+| [experiment_profiler.py](src/experiment_profiler.py) | TimingProfiler、MemoryProfiler、OperatorProfiler | 供其他脚本导入 |
+
+数据通常放在 `data/`，完整数据清单放在 `datasets/`，导出的性能样本放在 `samples/`，运行结果放在 `runs/`。图像与标注复核工具见 [visualizer 使用说明](visualizer/README.md)。
+
+## 配置与环境
+
+模型脚本需要可用的 PyTorch、Transformers、Accelerate、Pillow 和本地模型文件；GPU 推理需要 CUDA 环境。数据构建需要 Python 3.10+ 和 Pillow。运行前可单独检查环境。
 
 ```bash
-python3 src/s02_build_baseline_dataset.py --data-root data --out datasets/baseline_v1
+# 检查 Python 依赖是否存在冲突。
+python -m pip check
+
+# 检查模型接口、框架版本及 CUDA 是否可用。
+python -c 'import torch, transformers; from transformers import Qwen3_5ForConditionalGeneration; print(torch.__version__, transformers.__version__, torch.cuda.is_available())'
 ```
 
-已有本地清单可直接使用。构建入口要求新输出目录。性能和推理实验另需按运行机器配置模型、GPU 及输出目录。标注复核见 [visualizer 使用说明](visualizer/README.md)。
+`s02_export_samples.py` 和 `s02_sample_eval.py` 默认读取脚本目录下的同名 JSON，支持 `--config` 指定其他文件。JSON 内相对路径以该 JSON 所在目录为基准，CLI 示例中的相对路径以当前工作目录为基准。
 
-## 文件与启动约定
+模型路径、GPU、batch 和输出目录应按运行机器配置。新运行使用新的输出目录，正式评估恢复已有结果使用 `--resume`。
 
-| 入口 | 实验用途与输入 |
-|---|---|
-| [s01_memory_probe.py](src/s01_memory_probe.py) | 记录 BF16 权重加载前后显存、参数布局和显存快照。脚本顶层即加载模型；运行前检查文件内的模型路径、输出根目录和可见 GPU。 |
-| [s01_processor_probe.py](src/s01_processor_probe.py) | 在 CPU 上估算整图视觉 token、输入长度和生成预留。传入 `--model`、`--sample`、`--out-dir`；样本为含 `image` 和 `expected_detection` 的单样本 JSON。 |
-| [s01_single_reference_probe.py](src/s01_single_reference_probe.py) | 对一张参考图重复生成，检查原图像素坐标输出并记录时间与显存。复用时显式传入 `--model`、`--image`、`--gpu`、`--out`。 |
+## s01_memory_probe.py
 
-| 文件 | 用途 | 配置 |
-|---|---|---|
-| [s02_build_baseline_dataset.py](src/s02_build_baseline_dataset.py) | 构建数据清单 | 脚本内BUILD_SETTINGS与CLI |
-| [s02_export_samples.py](src/s02_export_samples.py) | 从完整训练集导出固定清单和原图 | [同名JSON](src/s02_export_samples.json) |
-| [s02_sample_eval.py](src/s02_sample_eval.py) | 样本吞吐、batch/DP与阶段/算子测量 | [同名JSON](src/s02_sample_eval.json) |
-| [s02_compare_vision_backends.py](src/s02_compare_vision_backends.py) | 成对生成并执行 vision SDPA/FA2 对照 | 样本评估JSON与CLI |
-| [s02_profile_workload.py](src/s02_profile_workload.py) | 为Nsight提供固定生成负载 | [NCU 采集脚本](src/profile_ncu.sh) |
-| [s02_evaluate_baseline.py](src/s02_evaluate_baseline.py) | 完整验证集质量评估 | CLI |
-| [s02_workload.py](src/s02_workload.py) | 共享输入、模型加载与生成语义 | 供样本效率与Nsight入口调用 |
-| [experiment_profiler.py](src/experiment_profiler.py) | 通用计时、显存和算子采集 | 库模块 |
+测量 BF16 权重加载前后的显存、加载耗时和参数布局，并保存显存快照。运行前修改脚本顶部的 `MODEL`、`OUT` 和 `CUDA_VISIBLE_DEVICES`。该脚本在顶层加载模型，直接运行即可。
 
-导出样本和样本评估这两个JSON入口默认读取脚本自身目录中的同名`.json`，不依赖启动时的工作目录。也可用`--config /path/to/config.json`覆盖；JSON内部的相对路径始终基于该JSON目录。默认的是配置文件位置，实验参数仍要求显式填写。
+```bash
+python src/s01_memory_probe.py
+```
 
-示例配置路径相对于src目录。导出脚本读取完整dataset；样本评估默认读取`../samples/perf_32/samples.jsonl`，NCU 在容器中默认读取同一固定清单的挂载路径 `/samples/samples.jsonl`，与benchmark输出目录独立。填写当前机器实际的4B模型目录和GPU，每轮使用新的out。以下命令从项目根目录执行。
+输出到带时间戳的子目录，包含 `load_metrics.json` 和显存快照 `load_memory.pickle`。
 
+## s01_processor_probe.py
 
+在 CPU 上检查单图 processor 结果，估算视觉 token、输入长度和生成预留。`--sample` 接受含 `image`、`expected_detection` 的单样本 JSON，也接受仅含一个样本的 JSON 数组。相对图像路径基于样本 JSON 所在目录。
 
-## s02_build_baseline_dataset.py：构建数据
+```bash
+python src/s01_processor_probe.py \
+  --model /model --sample data/reference.json --out-dir runs/processor_probe
+```
 
-读取整图及同名标注，按完整会话目录划分train/val/test，生成dataset.json、三个manifest和排除/错误报告。先核对BUILD_SETTINGS中的批次映射和真实目录名。
+输出 `processor_<时间戳>.json`。
+
+## s01_single_reference_probe.py
+
+对参考图重复生成原图像素坐标的眼部框及状态，记录加载、推理时间和显存。`--repeat` 控制首次推理后的重复次数。
+
+```bash
+python src/s01_single_reference_probe.py \
+  --model /model --image data/reference.jpg --gpu 0 \
+  --out runs/reference_v1 --repeat 3 \
+  --context-budget 5600 --max-new-tokens 256
+```
+
+输出 `preparation.json`、`prompt.txt`、加载与逐次推理指标，以及 `summary.json`。
+
+## s02_build_baseline_dataset.py
+
+读取整图及同名标注，按会话生成 train/val/test 清单。先核对脚本内 `BUILD_SETTINGS` 的目录及批次映射。`--out` 要求新目录。
 
 ```bash
 python src/s02_build_baseline_dataset.py \
-  --data-root /workspace/dms-eye-status-turbo/extract_data \
-  --out datasets/baseline_v1
+  --data-root data --out datasets/baseline_v1
 ```
 
-`--observed-list`可传入已查看诊断图片的相对路径清单，防止其进入最终测试集。manifest保存图片绝对路径；迁移图片目录后在实际环境重建。构建需要Python 3.10+和Pillow。
+可用 `--observed-list` 传入已经查看的诊断图像清单，每行填写相对于 `--data-root` 的路径，将这些图片排除在最终测试集之外。
 
-## s02_export_samples.py：导出固定性能样本
+输出 `dataset.json`、各 split 的 manifest 和排除/错误报告。manifest 使用绝对图像路径，迁移数据目录后应在目标环境重建。标注字段 `gt_pixel` 为像素 xyxy，`target_norm1000` 为 0～1000 整数 xyxy。
 
-在完整dataset可访问的机器上，填写同名JSON中的dataset和out，默认从train均匀随机无放回抽取32张，seed为20261008。按sample_id排序后抽样，保留抽样顺序；样本不足32张时明确报错。修改数量需显式调整sample_count。
+## s02_export_samples.py
+
+在同名 JSON 中填写 `dataset`、`out`、`sample_count`、`sample_seed`。默认从 train 无放回抽取 32 张，样本不足时报错。
 
 ```bash
 python src/s02_export_samples.py
+# 或指定配置
+python src/s02_export_samples.py --config src/s02_export_samples.json
 ```
 
-导出目录如下，迁移时整体复制：
+输出目录必须不存在，迁移时整体复制。
 
 ```text
 samples/perf_32/
@@ -66,141 +105,126 @@ samples/perf_32/
     └── ...
 ```
 
-原图按字节复制，不重新编码。样本数据与溯源统计分为两个文件，用sample_id关联：
+`samples.jsonl` 每行保存 sample_id、相对 image 路径、尺寸和处理后的标注。`sample_info.json` 保存抽样参数与来源信息。图片按原始字节复制；性能脚本读取清单中的 sample_id 和 image，图像路径相对于清单目录解析。
 
-| 文件 | 内容与用途 |
-|---|---|
-| samples.jsonl | sample_id、相对image路径、width、height、gt_pixel、target_norm1000；图像与处理后的标注放在同一行，清单无需split |
-| sample_info.json | 抽样seed、数量、source_dataset、source_split，以及samples列表中的原图/原标注路径、已有SHA256、批次和场景等溯源信息 |
+## s02_sample_eval.py
 
-标注沿用完整dataset中的原字段和坐标含义：gt_pixel为原图像素xyxy，target_norm1000为0～1000整数xyxy，导出时不重新计算。性能入口只使用sample_id和image，其余字段保留供训练或输出检查使用。溯源信息独立保存，不参与模型输入或评分；正式质量评估仍使用完整dataset。
-
-source_dataset和逐样本原路径仅用于追溯；迁移后运行只依赖samples.jsonl及images。输出目录已存在时拒绝覆盖；导出失败时清理本次临时目录。修改前已导出的目录保持原样，需要在新的out中重新导出才能得到这一布局。
-
-两个性能入口统一用sample_manifest指定导出的清单，图片路径始终相对清单目录解析，与启动目录无关。入口检查唯一ID、唯一图像路径和文件存在；训练集来源在导出时确认，运行时不依赖split字段。旧运行结果里的绝对路径清单不再作为新输入。正式评估仍使用完整dataset。
-
-## s02_sample_eval.py：效率测量
-
-默认JSON为benchmark：读取导出的32张固定训练样本，扫描B1/2/4/8/16/32。不读取GT评分，不替代正式baseline。
+在同名 JSON 中配置 `model`、`sample_manifest`、`out`、`mode`、`batch_sizes`、`gpus` 和预热/生成参数。默认配置扫描 B1/2/4/8/16/32，运行前按显存容量调整。
 
 ```bash
 python src/s02_sample_eval.py
+python src/s02_sample_eval.py --config src/s02_sample_eval.json
 ```
 
-通过同名JSON的mode选择功能，每次修改out：
-
-| mode | 测什么 | 条件字段 |
+| mode | 功能 | 专用字段 |
 |---|---|---|
-| benchmark | 完整清单的吞吐、五阶段基础耗时及整轮显存峰值 | repeats |
-| timing | 读图、processor、H2D、generate、输出解码的CPU/CUDA事件区间 | capture_batches |
-| memory | 五阶段allocated/reserved入口、结束、峰值与增量 | capture_batches |
-| operator | 流程和vision/prefill/decode区间、算子统计与trace | capture_batches |
+| `benchmark` | 完整样本清单的吞吐、基础阶段耗时和显存峰值 | `repeats` |
+| `timing` | 读图、processor、H2D、generate、解码的计时 | `capture_batches` |
+| `memory` | 各阶段 allocated/reserved、峰值和增量 | `capture_batches` |
+| `operator` | 算子统计与 CPU/GPU trace | `capture_batches` |
 
-切换到timing/memory/operator时移除repeats，增加正整数capture_batches，例如3；sample_manifest继续指向同一导出清单。batch_sizes控制扫描档位，warmup_batches控制预热；dataset、sample_count和sample_seed只属于导出配置，性能入口不再抽样。
+切换到诊断模式时移除 `repeats`，填写正整数 `capture_batches`。`warmup_batches` 控制预热，`context_budget` 和 `max_new_tokens` 控制输入及生成预算。`attn_implementation` 接受后端名称，也可分别配置子模型。
 
-gpus为GPU ID/UUID字符串列表。多卡仅benchmark支持，增加dp_batch_size并要求该档位属于batch_sizes；每卡独立进程和完整模型，样本无重复分片，以全部卡完成的全局窗口比较吞吐。
-
-输出config.json、resolved_samples.json、sample_info.json、summary.json及逐档结果；resolved_samples.json保存本轮解析后的绝对路径，仅作为运行快照；operator另存profile_b*/rank0/trace.json与operators.json。计时单位为微秒，批耗时除以图片数是摊销耗时。profiler数据用于归因，普通benchmark用于比较收益；OOM、超预算或运行错误停止，不静默缩小batch。
-
-operator模式统一承担算子次数、CPU/CUDA耗时、内存摘要与trace采集，不再设置独立的Python attention接口核验入口。`operators.json`包含`count`、`cpu_total_us`、`self_cpu_us`、`device_total_us`和`self_device_us`等字段，是整个采集窗口按事件名聚合的统计；嵌套事件的total时间不能直接相加。
-
-trace保留`pipeline/`流程范围和`experiment/vision`、`experiment/language_prefill`、`experiment/language_decode`、`experiment/prefill_logits`、`experiment/decode_logits`模块阶段范围。沿CPU事件的父子关系及时间范围定位阶段，再通过CUDA launch关联ID匹配kernel和输入shape；不能只按CPU/GPU时间重叠判断归属。当前hook标记到阶段，不直接提供每个attention层的路径；只有需要区分同名同shape实例时再补目标模块标记。算子调用次数与kernel次数不要求一一对应。
-
-后续NCU独立运行`s02_profile_workload.py`，不与torch.profiler同时采集。两个运行通过固定负载、阶段、kernel名称、shape和启动配置核对实例，不跨运行复用关联ID或时间戳。已有`execution_inspect_*`历史产物继续保留，新采集使用operator模式。
-
-## s02_profile_workload.py：Nsight负载
-
-读取同一冻结清单，在每个待采集batch完整generate预热后，用NVTX `measure`标记生成及完成同步；内部通过hook标记`vision`、`language_prefill`、`language_decode`及独立的`prefill_logits`/`decode_logits`。语言阶段按进入forward前的cache长度和输入长度判定，不按调用序号猜测；阶段之间不新增同步。输入准备、预热和输出写盘位于范围外。与operator对照时核对固定样本、模型、SDPA后端、输入/生成预算及预热条件，使用独立out；两个入口的采集窗口和预热组织不同，不把各自耗时直接作性能对照。
-
-在 [profile_ncu.sh](src/profile_ncu.sh) 顶部设置模型、输入、预热、生成预算和 NCU 过滤条件。shell 直接启动 NCU，Python 执行一次固定工作负载，记录实际生效参数与输出；每轮输出目录含 report.ncu-rep、command.sh 和 workload/workload.json。源码与输入挂载约定见脚本默认值。
-
-先在 trace 中按阶段统计设备耗时和每图累计耗时，反查热点 kernel 对应的算子与 shape，再按组选择可比实例。4090/4B 的目标 prefill GEMM 在 B8 有 120 次同名调用，其中 64 次对应权重 [2560,9216]。该 shape 首次出现的 grid 在 B1 为 [72,75,1]，在 B8 为 [72,598,1]，block 均为 [64,1,1]。以下为容器内示例：
-
-```bash
-# 定向 basic：各核对前 4 个匹配。
-BATCH_SIZE=1 bash src/profile_ncu.sh
-BATCH_SIZE=8 bash src/profile_ncu.sh
-
-# 两档 basic 分别确认第 1 和第 3 个匹配后才执行 full。
-NCU_SET=full BATCH_SIZE=1 LAUNCH_SKIP=0 LAUNCH_COUNT=1 bash src/profile_ncu.sh
-NCU_SET=full BATCH_SIZE=8 LAUNCH_SKIP=2 LAUNCH_COUNT=1 bash src/profile_ncu.sh
+```json
+{"vision_config": "sdpa", "text_config": "sdpa"}
 ```
 
-`--print-command` 可预览实际命令。上述序号限于本轮阶段和名称过滤条件；shape/grid 相同且需区分投影时补模块级 NVTX 标记。全窗口盘点使用 `NCU_SCOPE=measure NCU_SET=basic bash src/profile_ncu.sh`。旧的 Python `--ncu` 包装入口和默认 JSON 已由 shell 收敛替代，其他 NCU 参数直接在采集脚本中维护。
+`gpus` 使用 GPU ID/UUID 字符串列表。多卡仅用于 `benchmark`，还需设置属于 `batch_sizes` 的 `dp_batch_size`。每卡使用独立进程及模型副本，分片处理样本。
 
-- full后核对报告的实际名称、阶段、启动配置和采集数量是否满足所选范围；无匹配、少采、执行失败或实例对应不明时，不作预期目标的硬件结论。
-- NVTX标记CPU提交范围。默认kernel replay下，阶段筛选仍生成逐kernel指标，不是阶段整体Roofline；不根据CPU标记跨度计算GPU阶段耗时。
-- full内容依云端版本和硬件而定。检查匹配精度/计算路径的Roofline、计算管线、各存储层级吞吐，再结合scheduler、eligible warps、依赖等待及spill判断；缺项按实际支持的section/metric补采。不能仅凭低occupancy或低DRAM带宽确定原因。
+输出配置、解析后的样本清单、`summary.json` 和逐档结果。`operator` 另保存 `trace.json` 与 `operators.json`，包含 vision、language_prefill、language_decode 及 logits 阶段标记。时间单位为微秒。普通吞吐使用 benchmark 结果，profiler 输出用于执行过程分析。OOM、超预算或运行错误会停止任务。
 
-输出workload.json，保留实际环境、样本、输入形状、图像网格与生成步数；ncu设置另随报告记录，特别是筛选、replay、缓存和时钟控制。采集会扰动执行，其耗时不作为普通吞吐；优化收益另用benchmark验证。attention的调用组织结合operator trace和模型实现判断；硬件指标不能证明后端不支持batch。
+## s02_compare_vision_backends.py
 
-## s02_evaluate_baseline.py：正式质量评估
+生成成对配置并依次调用 `s02_sample_eval.py`。脚本将 text 后端固定为 SDPA，vision 后端分别设为 SDPA、FlashAttention-2，其他负载参数继承基础 JSON。
 
-逐图处理完整验证清单，报告解析、定位、对应侧四类状态和端到端指标；失败保留分母。先做可选CPU检查，再运行真实推理：
+运行前单独检查 FlashAttention 依赖和变长接口。环境需提前安装与当前 PyTorch/CUDA 兼容的 flash-attn。
 
 ```bash
-python src/s02_evaluate_baseline.py --dataset datasets/baseline_v1 \
-  --out runs/baseline_preflight_v1 --preflight-only
-python src/s02_evaluate_baseline.py --dataset datasets/baseline_v1 \
-  --model /workspace/dms-eye-status-turbo/qwen_models/Qwen3.5-4B \
-  --gpu 0 --out runs/baseline_val_v1 --context-budget 5600 --max-new-tokens 256
-```
+python -c 'import torch, transformers, flash_attn; from flash_attn import flash_attn_varlen_func; print(torch.__version__, torch.version.cuda, transformers.__version__, flash_attn.__version__)'
 
-`--resume`用相同参数恢复，成功与失败case均保留；`--save-overlays`保存GT/预测叠框，恢复时保持该选项一致。最终候选才用`--split test --final-test`。输出config.json、cases/、summary.json、by_batch.json；四类覆盖不全时macro-F1为null，evaluation_complete只代表清单处理完整。
-
-## 共享模块与固定合同
-
-s02_workload.py封装固定prompt、可迁移样本清单校验与路径解析、离线模型加载、图片/processor处理和greedy生成，不拥有测量策略。experiment_profiler.py提供TimingProfiler、MemoryProfiler和OperatorProfiler，可供后续训练循环复用，当前未实现LoRA训练。
-
-- 正式批次：67/68/70/71/75训练、77验证、79测试；完整会话不能拆分，同人不同会话允许跨集合。hard或缺失/非法标注整图排除，构建时检查跨集合相同图片。
-- GT按标注ID固定映射：id=2为image_left_eye，id=1为image_right_eye，不按框中心重新排序。schema v4保留像素GT与整数Norm1000 xyxy目标；预测还原一次为浮点像素评分，不补框、不交换左右。
-- BF16、离线加载、左padding、非思考greedy、num_beams=1、use_cache=True。示例总预算5600、输出上限256，超限不截断；图像预算沿用processor。样本效率与Nsight负载seed=42，正式评估CLI默认seed=20261003。
-- 每次generate不传递上次输出cache。样本效率通过 attn_implementation 指定后端，旧JSON缺省时沿用SDPA；Nsight负载显式配置同一后端。Nsight入口只接受完整采集批次，样本数须达到batch_size×capture_batches；operator入口可能包含尾批，以实际输出的批次和样本数为准。
-
-## 当前状态与依据
-
-同步日期2026-11-10。当前模型统一为4B，本地4090用于NCU学习与小规模优化对照，云端用于优化复验和训练。固定性能样本由独立导出脚本生成，默认32张。9B 表格见历史实验附录。上文 Nsight 示例依据 4090/4B trace，候选匹配位置须用当前设备的定向 basic 确认。历史B16是9B的DP候选。下一步核验实际后端路径并采集代表性vision attention、prefill GEMM硬件指标，DP可独立推进。正式全量baseline仍待运行；profiler与NCU入口分工见上文，本地结构/模拟验证不代表GPU性能或模型质量通过。
-
-知识库实验方案定义方法，实验记录及附录保存历史结果；本说明不复制历史分析。用户后续明确约定优先于旧文档中的GT排序、非法标注处理或schema表述。原文位置见AGENTS.md，历史结果不要求适配当前接口。
-
-参考：[Qwen3.5实现](https://github.com/huggingface/transformers/blob/v5.2.0/src/transformers/models/qwen3_5/modeling_qwen3_5.py)、[Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html)。
-
-
-## Vision attention 后端对照
-
-目标是在固定4B模型、BF16、输入图像网格和生成条件下，对照视觉SDPA逐序列调用与FlashAttention-2变长序列路径。只改变视觉后端，语言侧保持SDPA。本实验不改变linear attention的可选加速依赖。现有benchmark、timing、memory、operator入口复用同一配置，记录实际子模型后端和flash-attn版本；缺依赖或请求未生效会将配置记为失败。
-
-使用 [s02_compare_vision_backends.py](src/s02_compare_vision_backends.py) 生成成对配置并执行对照。默认按 operator、timing、benchmark 顺序，每个模式先 SDPA 后 FA2，扫描 B1/B8；诊断各采 1 批，benchmark 重复 3 次。模型、样本及预热/生成预算继承 `s02_sample_eval.json`，可以用 `--config` 指定其他基础配置。脚本固定 text 为 SDPA，只切换 vision。
-
-```bash
 python src/s02_compare_vision_backends.py \
-  --model /model --sample-manifest /samples/samples.jsonl \
+  --model /model --sample-manifest samples/perf_32/samples.jsonl \
   --out runs/vision_backend_v1
 ```
 
-`--out` 要求新目录，内部 `configs/` 保存实际配置，`sdpa_operator/`、`fa2_operator/` 等目录保存对应结果。脚本使用当前 Python，任一实验失败即停止并保留结果。单项重跑可修改该项配置的 out，再交给 `s02_sample_eval.py --config`。
-
-| 参数 | 用途 |
+| 参数 | 用途及默认行为 |
 |---|---|
-| `--prepare-only` | 只生成配置并打印命令，供审核或拆开执行 |
-| `--modes operator` | 只运行两种后端的短窗口诊断；也支持 timing、memory、benchmark |
-| `--gpu 0 --batch-sizes 1 8` | 设置单卡与递增 batch 档位 |
-| `--capture-batches 1 --repeats 3` | 分别控制诊断批数与 benchmark 重复数 |
-| `--reverse` | 每个模式先 FA2 后 SDPA，在新目录复测运行顺序影响 |
+| `--config` | 基础配置，默认 `src/s02_sample_eval.json` |
+| `--model`、`--sample-manifest` | 覆盖模型及样本路径 |
+| `--gpu`、`--batch-sizes` | 默认单卡 0，batch 为 1、8 |
+| `--modes` | 默认依次 operator、timing、benchmark，也可选 memory |
+| `--capture-batches`、`--repeats` | 默认诊断采 1 批，benchmark 重复 3 次 |
+| `--prepare-only` | 只生成配置并打印命令 |
+| `--reverse` | 每个模式先运行 FA2，再运行 SDPA |
 
-正式执行前脚本检查 `flash_attn_varlen_func` 能否导入并打印框架版本。环境需先安装兼容的 FlashAttention；安装后两种后端都在同一环境重测，验收通过的版本固化到镜像。
+`--out` 必须为新目录，生成的配置位于 `configs/`，结果位于 `sdpa_operator/`、`fa2_operator/` 等子目录。任一子进程失败即停止并保留结果。单项重跑时修改对应 JSON 的 `out`，再使用 `s02_sample_eval.py --config` 执行。
+
+## s02_profile_ncu.sh 与 s02_profile_workload.py
+
+NCU 脚本配置采集条件，调用带 NVTX 标记的 Python 负载。运行环境需要 Nsight Compute 及 GPU 性能计数器访问权限。
 
 ```bash
-# 约束已验收的框架版本，限制编译并行度以控制内存占用。
-python -m pip freeze | grep -Ei '^(torch|transformers|accelerate|pillow)==' > /tmp/vision-backend-constraints.txt
-MAX_JOBS=2 python -m pip install --no-build-isolation -c /tmp/vision-backend-constraints.txt flash-attn
-python -m pip check
+# 确认 NCU 可执行文件和版本。
+ncu --version
+
+# 预览定向 basic 命令，确认路径与过滤条件。
+MODEL_DIR=/model SAMPLE_MANIFEST=samples/perf_32/samples.jsonl \
+  RESULTS_DIR=runs/ncu BATCH_SIZE=1 \
+  bash src/s02_profile_ncu.sh --print-command
 ```
 
-先核对每档result.json的status与runtime.attention_backends，再按同batch、同sample_id比较输出。operator窗口只采一个batch，故B1与B8覆盖数量不同；同一batch的后端对照使用相同样本。完整清单比较使用benchmark输出。检查输入token、图像网格、输出长度、截断、JSON解析与眼部框/状态差异，逐token变化需进一步复核。固定性能样本只支持输出回归诊断，采用候选前另做任务质量回归。
+移除 `--print-command` 后开始采集。
 
-在operator trace中定位vision阶段。SDPA路径的视觉attention接口调用通常随图像序列数增长；FA2路径预期每层进入一次变长attention接口，并通过cu_seqlens隔离各图。检查实际前向kernel及其调用组织，CUDA kernel数量可能受实现影响。timing模式用于比较vision阶段的同步诊断时间，benchmark模式用完整清单的重复耗时、images/s和显存峰值判定收益。必要时反转后端运行顺序，在新输出目录重复，以排除运行顺序影响。
+| 环境变量 | 用途及默认值 |
+|---|---|
+| `MODEL_DIR` | 模型目录，默认 `/model` |
+| `SAMPLE_MANIFEST` | 清单，默认 `/samples/samples.jsonl` |
+| `RESULTS_DIR` | 输出根目录，默认 `/out`；本地可设为 `runs/ncu` |
+| `BATCH_SIZE` | 默认 1 |
+| `NCU_SCOPE` | 默认 `target`；`measure` 用于整个 measure 范围的 basic 采集 |
+| `NCU_SET` | 默认 `basic`，定向采集支持 `full` |
+| `PHASE` | 默认 `language_prefill`；支持 vision、language_decode、prefill_logits、decode_logits |
+| `KERNEL` | kernel 名正则；默认值在脚本顶部，使用前核对目标名称 |
+| `LAUNCH_SKIP`、`LAUNCH_COUNT` | basic 默认 0、4；full 必须显式设置 |
 
-若调用减少但vision耗时未改善，说明本负载下合并调用收益有限。若vision改善而整体收益很小，检查prefill/decode占比及输出长度。只有重复吞吐收益、容量和质量回归都满足预定容差才采用候选。当前实现只完成可配置与生效检查，4090上的安装兼容性、变长路径及性能收益需要实际运行验证。
+例如，已经核对目标是当前阶段及名称过滤范围内的第 3 次匹配时，使用 `LAUNCH_SKIP=2`、`LAUNCH_COUNT=1`。
 
-依据为[Transformers 5.2.0视觉attention分支](https://github.com/huggingface/transformers/blob/v5.2.0/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L915-L956)、[子模型后端配置](https://huggingface.co/docs/transformers/v5.2.0/en/attention_interface#backbone-specific-attention)和[FlashAttention安装与硬件支持](https://github.com/Dao-AILab/flash-attention#installation-and-features)。
+```bash
+MODEL_DIR=/model SAMPLE_MANIFEST=samples/perf_32/samples.jsonl \
+  RESULTS_DIR=runs/ncu BATCH_SIZE=8 NCU_SET=full \
+  LAUNCH_SKIP=2 LAUNCH_COUNT=1 bash src/s02_profile_ncu.sh
+```
+
+GPU、预热、采集批数、生成预算、CPU 线程数和 attention 后端配置在 shell 的 `workload` 数组中。每轮创建唯一目录，保存 `command.sh`、`report.ncu-rep` 和 `workload/workload.json`。
+
+Python 负载也可以直接运行，以下参数均需提供。它保存环境、样本、输入形状和生成结果，供外部 profiler 采集。
+
+```bash
+python src/s02_profile_workload.py \
+  --model /model --sample-manifest samples/perf_32/samples.jsonl \
+  --out runs/profile_workload_v1 --batch-size 1 --gpu 0 \
+  --warmup-batches 2 --capture-batches 1 \
+  --context-budget 5600 --max-new-tokens 256 \
+  --cpu-threads-per-worker 4 --attn-implementation sdpa
+```
+
+清单需满足 `batch_size × capture_batches` 的完整批次要求。NVTX 提供 measure、vision、language_prefill、language_decode、prefill_logits 和 decode_logits 范围。NCU 与 torch.profiler 分开运行。
+
+## s02_evaluate_baseline.py
+
+读取完整数据集逐图推理，评估解析、定位、眼部状态及端到端指标。显式传入模型路径。
+
+```bash
+# CPU 检查数据与评估输入。
+python src/s02_evaluate_baseline.py --dataset datasets/baseline_v1 \
+  --out runs/baseline_preflight_v1 --preflight-only
+
+# 默认评估 val。
+python src/s02_evaluate_baseline.py --dataset datasets/baseline_v1 \
+  --model /model --gpu 0 --out runs/baseline_val_v1 \
+  --context-budget 5600 --max-new-tokens 256
+```
+
+`--resume` 使用相同配置恢复已有输出，`--save-overlays` 保存 GT/预测叠框，恢复时保持该选项一致。测试集使用 `--split test --final-test`。
+
+输出 `config.json`、`cases/`、`summary.json`、`by_batch.json`。GT 使用原图像素 xyxy，模型输出按 Norm1000 xyxy 还原为像素评分。失败样本计入分母；四类状态覆盖不全时 macro-F1 为 null，`evaluation_complete` 表示清单处理完整。

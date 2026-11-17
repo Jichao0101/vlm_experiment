@@ -50,13 +50,6 @@ def main():
     if out.exists():
         parser.error(f'输出目录已存在，请使用新目录：{out}')
 
-    # 正式执行前检查候选接口，避免测完基线后才发现 FA2 缺依赖。
-    if not args.prepare_only:
-        subprocess.run([sys.executable, '-c',
-                        'import torch, transformers, flash_attn; '
-                        'from flash_attn import flash_attn_varlen_func; '
-                        'print(torch.__version__, torch.version.cuda, '
-                        'transformers.__version__, flash_attn.__version__)'], check=True)
     out.mkdir(parents=True, exist_ok=False)
     config_dir = out / 'configs'
     config_dir.mkdir()
